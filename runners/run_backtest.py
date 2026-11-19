@@ -25,23 +25,32 @@ from oms.database import reset_db, get_connection
 from oms.engine import OrderManagementSystem
 from data.market_fetcher import MarketDataFetcher
 from agents.graph import MultiAgentTradingPipeline
+from risk.dynamic_leverage import DynamicLeverageEngine
+from risk.portfolio_guard import PortfolioRiskGuard
+
+DEFAULT_BACKTEST_UNIVERSE = [
+    "GLD", "SPY", "QQQ", "AAPL", "NVDA", "GOOGL", "BTC/USDT", "ETH/USDT", "SOL/USDT"
+]
 
 def run_backtest_simulation(
-    symbols: List[str] = ["SPY", "QQQ", "NVDA", "GLD", "BTC/USDT"],
+    symbols: List[str] = DEFAULT_BACKTEST_UNIVERSE,
     start_equity: float = STARTING_EQUITY,
-    bars_count: int = 350
+    bars_count: int = 400
 ) -> Dict[str, Any]:
-    print("=" * 80)
-    print("      MULTI-ASSET & OPTIONS BACKTEST SIMULATOR (SELF-HOSTED OMS)")
-    print("=" * 80)
-    print(f"Initial Simulated Capital: ${start_equity:,.2f}")
-    print(f"Target Universe: {symbols}")
+    print("=" * 85)
+    print("      MULTI-ASSET & OPTIONS QUANT BACKTEST REPLAY (SELF-HOSTED OMS)")
+    print("=" * 85)
+    print(f"Initial Starting Capital: ${start_equity:,.2f}")
+    print(f"Target Universe ({len(symbols)} Assets): {symbols}")
+    print(f"Timeframe: 1-Hour Intraday Base Bars (aligned with 4-Hour Macro Trend Regime)")
 
     # 1. Reset local OMS database
     reset_db(DATABASE_PATH, initial_equity=start_equity)
     oms = OrderManagementSystem(DATABASE_PATH)
     fetcher = MarketDataFetcher()
     pipeline = MultiAgentTradingPipeline()
+    dyn_lev = DynamicLeverageEngine()
+    portfolio_guard = PortfolioRiskGuard(DATABASE_PATH)
 
     # 2. Load historical series for all symbols
     market_data: Dict[str, pd.DataFrame] = {}
@@ -168,9 +177,29 @@ def run_backtest_simulation(
     winning_trades = len(closed_pos[closed_pos["realized_pnl"] > 0])
     win_rate = (winning_trades / len(closed_pos) * 100.0) if len(closed_pos) > 0 else 0.0
 
-    print("\n" + "=" * 80)
-    print("                    BACKTEST PERFORMANCE REPORT")
-    print("=" * 80)
+    print("\n" + "=" * 85)
+    print("                    PER-ASSET BREAKDOWN & PnL ATTRIBUTION")
+    print("=" * 85)
+    print(f"{'Asset / Symbol':<18} | {'Asset Class':<12} | {'Fills':<6} | {'Realized PnL':<14} | {'Unrealized PnL':<14} | {'Status'}")
+    print("-" * 85)
+    for sym in symbols:
+        underlying = sym.split("/")[0]
+        sym_pos = pos_df[pos_df["underlying"].str.contains(underlying)] if not pos_df.empty else pd.DataFrame()
+        sym_exec = exec_df[exec_df["symbol"].str.contains(underlying)] if not exec_df.empty else pd.DataFrame()
+        
+        realized = float(sym_pos["realized_pnl"].sum()) if not sym_pos.empty else 0.0
+        unrealized = float(sym_pos["unrealized_pnl"].sum()) if not sym_pos.empty else 0.0
+        fill_count = len(sym_exec)
+        ac_name = "CRYPTO" if "USDT" in sym else ("COMMODITY" if sym in ["GLD", "USO", "SLV"] else "US_EQUITY")
+        stat_str = "ACTIVE" if (not sym_pos.empty and (sym_pos["status"] == "OPEN").any()) else "FLAT"
+
+        print(f"{sym:<18} | {ac_name:<12} | {fill_count:<6} | ${realized:>+12,.2f} | ${unrealized:>+12,.2f} | {stat_str}")
+
+    print("=" * 85)
+
+    print("\n" + "=" * 85)
+    print("                    PORTFOLIO BACKTEST PERFORMANCE REPORT")
+    print("=" * 85)
     print(f"  Starting Balance:             ${start_equity:,.2f}")
     print(f"  Ending Net Liquidation Value: ${final_equity:,.2f}")
     print(f"  Gross Realized PnL:           ${gross_pnl:+,.2f} ({gross_pnl/start_equity*100:+.2f}%)")
@@ -182,7 +211,7 @@ def run_backtest_simulation(
     print(f"  Annualized Sharpe Ratio:      {sharpe:.2f}")
     print(f"  Portfolio Net Delta:          {final_stats['net_delta']:.2f}")
     print(f"  Portfolio Net Theta:          {final_stats['net_theta']:.2f}/day")
-    print("=" * 80 + "\n")
+    print("=" * 85 + "\n")
 
     return {
         "final_equity": final_equity,

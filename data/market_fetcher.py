@@ -111,7 +111,7 @@ class MarketDataFetcher:
 
     def _generate_synthetic_ohlcv(self, symbol: str, asset_class: str, num_bars: int = 500) -> pd.DataFrame:
         np.random.seed(abs(hash(symbol)) % 100000)
-        base_prices = {"SPY": 590.0, "QQQ": 510.0, "NVDA": 145.0, "AAPL": 230.0, "MSFT": 420.0, "GLD": 240.0, "USO": 75.0, "SLV": 28.0, "BTC/USDT": 92000.0, "ETH/USDT": 3100.0, "SOL/USDT": 180.0}
+        base_prices = {"SPY": 590.0, "QQQ": 510.0, "NVDA": 145.0, "AAPL": 230.0, "GOOGL": 180.0, "MSFT": 420.0, "GLD": 240.0, "USO": 75.0, "SLV": 28.0, "BTC/USDT": 92000.0, "ETH/USDT": 3100.0, "SOL/USDT": 180.0}
         start_px = base_prices.get(symbol, 100.0)
 
         vol = 0.003 if asset_class == "US_EQUITY" else (0.008 if asset_class == "CRYPTO" else 0.004)

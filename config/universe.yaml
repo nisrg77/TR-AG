@@ -16,6 +16,10 @@ universe:
       name: "Apple Inc."
       asset_class: "US_EQUITY"
       has_options: true
+    - symbol: "GOOGL"
+      name: "Alphabet Inc."
+      asset_class: "US_EQUITY"
+      has_options: true
     - symbol: "MSFT"
       name: "Microsoft Corporation"
       asset_class: "US_EQUITY"

@@ -34,6 +34,8 @@ from risk.pyramid_manager import PyramidManager
 from oms.tranche_manager import TrancheManager
 from features.microstructure import MicrostructureEngine
 from oms.book_simulator import OrderBookSimulator
+from risk.dynamic_leverage import DynamicLeverageEngine
+from oms.margin_liquidation import MarginLiquidationEngine
 
 TEST_DB = ROOT_DIR / "data" / "test_verification.db"
 
@@ -306,6 +308,68 @@ def run_all_tests():
         mid_price=3.35
     )
     check("OMS L2 Book-Walking Partial Fill", walk_res["levels_walked"] == 3 and walk_res["blended_fill_price"] > 3.40, f"Walked 3 levels: Filled 15 contracts @ blended ${walk_res['blended_fill_price']:.4f} (Slippage: ${walk_res['total_slippage_usd']:.2f})")
+
+    # -------------------------------------------------------------------------
+    # LAYER 7: DYNAMIC LEVERAGE, NOTIONAL TIERS & LIQUIDATION ENGINE
+    # -------------------------------------------------------------------------
+    print("\n--- [LAYER 7: Dynamic Leverage, Notional Tiers & Liquidation Engine] ---")
+    dyn_lev_engine = DynamicLeverageEngine()
+    margin_liq_engine = MarginLiquidationEngine()
+
+    # [34] Volatility- & Confidence-Scaled Dynamic Leverage (100x calm trend -> 22x high-ATR spike)
+    # Calm regime: realized_vol = 0.45 (target), conf = 0.90 -> expands to 100x
+    lev_calm = dyn_lev_engine.compute_dynamic_leverage(
+        asset_class="CRYPTO",
+        current_price=90000.0,
+        stop_price=89500.0,
+        realized_vol=0.45,
+        confidence_score=0.90
+    )
+    # Volatility spike regime: realized_vol = 1.60 (3.5x spike), conf = 0.70 -> contracts sharply
+    lev_spike = dyn_lev_engine.compute_dynamic_leverage(
+        asset_class="CRYPTO",
+        current_price=90000.0,
+        stop_price=88500.0,
+        realized_vol=1.60,
+        confidence_score=0.70
+    )
+    check("Dynamic Leverage: Calm Expansion vs Spike Contraction", lev_calm["dynamic_leverage"] > 80.0 and lev_spike["dynamic_leverage"] < 30.0, f"Calm Trend: {lev_calm['dynamic_leverage']}x -> Volatility Shock: {lev_spike['dynamic_leverage']}x (M_vol={lev_spike['multipliers']['m_vol']})")
+
+    # [35] Progressive Notional Tier Step-Down across 4 Pyramid Tranches
+    # Tier 1 ($15k notional) -> 100x
+    tier1_cap = dyn_lev_engine.get_notional_tier_cap("CRYPTO", cumulative_notional=15000.0)
+    # Tier 2 ($60k cumulative notional) -> steps down to 50x
+    tier2_cap = dyn_lev_engine.get_notional_tier_cap("CRYPTO", cumulative_notional=60000.0)
+    # Tier 3 ($150k cumulative notional) -> steps down to 20x
+    tier3_cap = dyn_lev_engine.get_notional_tier_cap("CRYPTO", cumulative_notional=150000.0)
+    check("Progressive Notional Tier Step-Down", tier1_cap == 100.0 and tier2_cap == 50.0 and tier3_cap == 20.0, f"Brackets: <$25k={tier1_cap}x -> $25k-$100k={tier2_cap}x -> >$100k={tier3_cap}x")
+
+    # [36] Liquidation-Buffer Clamp & Intra-Bar Wick Liquidation Check
+    # If stop loss is 1.5% away ($100 to $98.50), clamp leverage <= 46x to keep liquidation price safely below stop
+    lev_clamped = dyn_lev_engine.compute_dynamic_leverage(
+        asset_class="CRYPTO",
+        current_price=100.0,
+        stop_price=98.50, # 1.5% stop distance
+        realized_vol=0.30,
+        confidence_score=0.95
+    )
+    # Calculate exact exchange liquidation price with 0.5% maintenance margin
+    liq_px = margin_liq_engine.calculate_liquidation_price(
+        asset_class="CRYPTO",
+        side="BUY",
+        entry_price=100.0,
+        leverage=lev_clamped["dynamic_leverage"]
+    )
+    # Intra-bar wick check: price dips to $97.00 -> breaches liquidation price
+    is_liq, fill_liq = margin_liq_engine.check_wick_liquidation("BUY", liquidation_price=liq_px, high_price=101.0, low_price=96.50)
+    check("Liquidation-Buffer Clamp & Intra-Bar Wick Liquidation", lev_clamped["dynamic_leverage"] <= 47.0 and is_liq, f"Clamped Lev: {lev_clamped['dynamic_leverage']}x (Liq Px: ${liq_px:.2f} < Stop $98.50) | Wick Liquidation Triggered @ ${fill_liq:.2f}")
+
+    # [37] 8-Hour Crypto Funding & Overnight Equity Swap Accrual
+    # $100k BTC position held for 24 hours (3 funding intervals of 0.01%) -> $30.00
+    crypto_funding = margin_liq_engine.calculate_funding_and_swap_accrual("CRYPTO", notional_value=100000.0, hours_held=24.0)
+    # $100k equity position held overnight for 48 hours (SOFR+2% = 7.5% annual / 365 * 2 days) -> $41.10
+    equity_swap = margin_liq_engine.calculate_funding_and_swap_accrual("US_EQUITY", notional_value=100000.0, hours_held=48.0)
+    check("8-Hour Crypto Funding & Overnight Swap Accrual", abs(crypto_funding - 30.0) < 0.5 and abs(equity_swap - 41.10) < 1.0, f"Crypto 24h Funding: ${crypto_funding:.2f} (3x 8h intervals) | Equity 48h Swap: ${equity_swap:.2f}")
 
     # -------------------------------------------------------------------------
     # FINAL VERIFICATION SUMMARY
