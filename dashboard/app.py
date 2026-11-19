@@ -60,6 +60,8 @@ with get_connection(DATABASE_PATH) as conn:
     exec_df = pd.read_sql("SELECT * FROM executions ORDER BY fill_timestamp DESC", conn)
     orders_df = pd.read_sql("SELECT * FROM orders ORDER BY created_at DESC", conn)
     signals_df = pd.read_sql("SELECT * FROM signals ORDER BY created_at DESC", conn)
+    tranches_df = pd.read_sql("SELECT * FROM position_tranches ORDER BY created_at DESC", conn)
+    audit_df = pd.read_sql("SELECT * FROM risk_audit_log ORDER BY created_at DESC", conn)
 
 # Top KPI Summary Cards
 if not ledger_df.empty:
@@ -105,12 +107,14 @@ with g_col4:
 st.write("---")
 
 # Tabbed Interface
-tab_equity, tab_positions, tab_blotter, tab_executions, tab_signals = st.tabs([
+tab_equity, tab_positions, tab_tranches, tab_blotter, tab_executions, tab_signals, tab_risk_audit = st.tabs([
     "📈 Equity Curve & Friction",
     "💼 Open Positions",
+    "🏃 Core & Runner Tranches",
     "📋 Order Blotter",
     "⚡ Executions & Fills",
-    "🧠 AI Signals"
+    "🧠 AI Signals",
+    "🛡️ Risk & Circuit Breaker Logs"
 ])
 
 # 1. Equity Curve Tab
@@ -197,3 +201,30 @@ with tab_signals:
         ]], use_container_width=True)
     else:
         st.info("No signals recorded.")
+
+# 3. Tranches Tab (Core + Runner & Pyramiding)
+with tab_tranches:
+    st.subheader("Core (70%) + Runner (30%) & Pyramid Tranches")
+    if not tranches_df.empty:
+        disp_tr = tranches_df[[
+            "tranche_id", "symbol", "pyramid_tier", "role", "quantity",
+            "entry_price", "stop_loss", "take_profit", "highest_high",
+            "breakeven_armed", "status", "realized_pnl"
+        ]].copy()
+        disp_tr["entry_price"] = disp_tr["entry_price"].map("${:,.2f}".format)
+        disp_tr["stop_loss"] = disp_tr["stop_loss"].map("${:,.2f}".format)
+        disp_tr["take_profit"] = disp_tr["take_profit"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "Trailing")
+        st.dataframe(disp_tr, use_container_width=True)
+    else:
+        st.info("No active child tranches recorded.")
+
+# 7. Risk & Circuit Breaker Audit Tab
+with tab_risk_audit:
+    st.subheader("🛡️ Institutional Risk Audit & Circuit Breaker Decisions")
+    if not audit_df.empty:
+        st.dataframe(audit_df[[
+            "audit_id", "timestamp_utc", "symbol", "decision", "rejection_reason",
+            "requested_qty", "approved_qty", "portfolio_delta_after", "cluster_risk_pct"
+        ]], use_container_width=True)
+    else:
+        st.info("No risk audit events logged yet.")

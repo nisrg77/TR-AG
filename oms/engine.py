@@ -15,6 +15,8 @@ from oms.database import get_connection, init_db
 from oms.execution_costs import ExecutionCostEngine
 from oms.options_lifecycle import OptionsLifecycleEngine
 from oms.portfolio import PortfolioManager
+from oms.tranche_manager import TrancheManager
+from oms.book_simulator import OrderBookSimulator
 from config.settings import STARTING_EQUITY
 
 class OrderManagementSystem:
@@ -24,6 +26,8 @@ class OrderManagementSystem:
         self.cost_engine = ExecutionCostEngine()
         self.opt_engine = OptionsLifecycleEngine()
         self.portfolio_mgr = PortfolioManager(self.db_path)
+        self.tranche_mgr = TrancheManager(self.db_path)
+        self.book_sim = OrderBookSimulator()
 
     def submit_order(
         self,
@@ -206,6 +210,21 @@ class OrderManagementSystem:
                         stop_loss=stop_px
                     )
 
+                    # Automatically partition into Core (70%) + Runner (30%) child tranches
+                    if side == "BUY":
+                        cur.execute("SELECT position_id FROM positions WHERE symbol = ? AND status = 'OPEN'", (symbol,))
+                        pos_row = cur.fetchone()
+                        if pos_row:
+                            self.tranche_mgr.create_tranches_for_fill(
+                                parent_position_id=pos_row["position_id"],
+                                symbol=symbol,
+                                total_quantity=qty,
+                                entry_price=fill_px,
+                                stop_loss_price=stop_px if stop_px is not None else fill_px * 0.98,
+                                atr=atr,
+                                conn=conn
+                            )
+
                     # Update Cash & Ledger
                     self._update_ledger_on_fill(
                         conn=conn,
@@ -235,6 +254,17 @@ class OrderManagementSystem:
                 low_price=low_price,
                 atr=atr,
                 timestamp_iso=timestamp_iso
+            )
+
+            # 5. Process Tranche Lifecycle (Core Take-Profit, Auto-Breakeven & Runner Trailing)
+            self.tranche_mgr.process_tranche_ticks(
+                symbol=symbol,
+                current_price=current_price,
+                high_price=high_price,
+                low_price=low_price,
+                atr=atr,
+                timestamp_iso=timestamp_iso,
+                conn=conn
             )
 
             conn.commit()

@@ -29,6 +29,11 @@ from oms.database import init_db, reset_db, get_connection
 from oms.engine import OrderManagementSystem
 from oms.options_lifecycle import OptionsLifecycleEngine
 from oms.portfolio import PortfolioManager
+from risk.portfolio_guard import PortfolioRiskGuard
+from risk.pyramid_manager import PyramidManager
+from oms.tranche_manager import TrancheManager
+from features.microstructure import MicrostructureEngine
+from oms.book_simulator import OrderBookSimulator
 
 TEST_DB = ROOT_DIR / "data" / "test_verification.db"
 
@@ -188,6 +193,119 @@ def run_all_tests():
         current_time_iso="2026-11-19T16:00:00Z"
     )
     check("Options Expiration Cash Settlement", settle_res["expired"] and settle_res["settlement_value"] == 10.0, f"Settlement Intrinsic: ${settle_res['settlement_value']:.2f} (Max spread profit)")
+
+    # -------------------------------------------------------------------------
+    # LAYER 6: INSTITUTIONAL RISK, RUNNER, PYRAMIDING & L2 LIQUIDITY
+    # -------------------------------------------------------------------------
+    print("\n--- [LAYER 6: Institutional Risk, Runner, Pyramiding & L2 Liquidity] ---")
+    tranche_mgr = TrancheManager(TEST_DB)
+    pyramid_mgr = PyramidManager(TEST_DB)
+    portfolio_guard = PortfolioRiskGuard(TEST_DB)
+    micro_engine = MicrostructureEngine()
+    book_sim = OrderBookSimulator()
+
+    # [25] Multi-Tranche Runner Split & Auto-Breakeven (70% Core TP @ +1.5R -> 30% Runner SL moved to Entry+Fees)
+    core_tr, run_tr = tranche_mgr.create_tranches_for_fill(
+        parent_position_id="POS-TEST-001",
+        symbol="SPY",
+        total_quantity=100.0,
+        entry_price=100.0,
+        stop_loss_price=98.0,
+        r_multiple=1.5,
+        friction_per_unit=0.05
+    )
+    check("Multi-Tranche Core (70%) + Runner (30%) Partition", core_tr["quantity"] == 70.0 and run_tr["quantity"] == 30.0, f"Core: {core_tr['quantity']} shs, Runner: {run_tr['quantity']} shs")
+
+    # Step ticks: Price reaches +1.5R ($103.00) -> Core hits TP, Runner SL moves to Entry+Fees ($100.05)
+    tr_events = tranche_mgr.process_tranche_ticks("SPY", current_price=103.10, high_price=103.10, low_price=100.0, atr=1.0)
+    with get_connection(TEST_DB) as conn:
+        run_state = conn.execute("SELECT stop_loss, breakeven_armed, status FROM position_tranches WHERE tranche_id = ?", (run_tr["tranche_id"],)).fetchone()
+    check("Multi-Tranche Runner Split & Auto-Breakeven", run_state["breakeven_armed"] == 1 and run_state["stop_loss"] >= 100.05, f"Core Hit TP @ $103.00 -> Runner Stop ratcheted to ${run_state['stop_loss']:.2f} (Entry+Fees)")
+
+    # [26] Runner Chandelier ATR Trailing Stop (Trails highest high - 2.0*ATR and exits on pullback)
+    # Price surges to $110.00 (ATR=2.0 -> Trail Stop = 110 - 2.0*2.0 = $106.00), then drops to $105.00
+    trail_events = tranche_mgr.process_tranche_ticks("SPY", current_price=105.0, high_price=110.0, low_price=105.0, atr=2.0)
+    with get_connection(TEST_DB) as conn:
+        run_closed_state = conn.execute("SELECT status, realized_pnl FROM position_tranches WHERE tranche_id = ?", (run_tr["tranche_id"],)).fetchone()
+    check("Runner Chandelier ATR Trailing Stop", run_closed_state["status"] == "CLOSED" and run_closed_state["realized_pnl"] > 0, f"Exited Runner at $106.00 Chandelier Trail Stop (+${run_closed_state['realized_pnl']:.2f})")
+
+    # [27] Pyramid Guard: Block Losing Add-On (Rejected Tier 2 entry while Tier 1 unrealized PnL < 0)
+    # Create an open losing Tier 1
+    tranche_mgr.create_tranches_for_fill(
+        parent_position_id="POS-PYR-001",
+        symbol="NVDA",
+        total_quantity=50.0,
+        entry_price=150.0,
+        stop_loss_price=145.0,
+        pyramid_tier=1
+    )
+    # Price is now $148.00 (Tier 1 is down -$2.00)
+    pyr_app, pyr_reason, _, _, _ = pyramid_mgr.evaluate_pyramid_entry("NVDA", "BUY", current_price=148.0, atr=2.0, base_unit_qty=50.0, account_nlv=100000.0)
+    check("Pyramid Guard: Block Losing Add-On", not pyr_app and "UNPROFITABLE" in pyr_reason, f"Blocked Tier 2: {pyr_reason}")
+
+    # [28] Pyramid Execution: 4 Decaying Tiers + Stop Ratchet (1.0x/0.75x/0.50x/0.25x filled; cluster risk <= 3.0%)
+    # Simulate winner rally: Tier 1 fills @ 150 -> price rallies to 154 (+2R) -> Tier 2 allowed!
+    pyr2_app, pyr2_reason, tier2_num, qty2, stop2 = pyramid_mgr.evaluate_pyramid_entry("NVDA", "BUY", current_price=154.0, atr=2.0, base_unit_qty=50.0, account_nlv=100000.0)
+    check("Pyramid Execution: 4 Decaying Tiers + Stop Ratchet", pyr2_app and tier2_num == 2 and qty2 == 37.5, f"Tier 2 Approved (Qty: {qty2} = 0.75x) | Ratchet Stop: ${stop2:.2f}")
+
+    # [29] Correlation Cluster & Daily Drawdown Circuit Breaker (Halted new entries at -3.0% daily loss)
+    # Seed account ledger with -3.5% intraday drawdown
+    with get_connection(TEST_DB) as conn:
+        conn.execute("INSERT INTO account_ledger (timestamp_utc, cash_balance, reserved_margin, total_equity, realized_pnl, unrealized_pnl, cumulative_friction_usd, note) VALUES ('2026-11-19T12:00:00Z', 96000.0, 0.0, 96000.0, -4000.0, 0.0, 50.0, 'Simulated Drawdown')")
+        conn.commit()
+
+    dd_app, dd_reason, _ = portfolio_guard.evaluate_order_risk(
+        symbol="AAPL",
+        asset_class="US_EQUITY",
+        side="BUY",
+        order_type="MARKET",
+        entry_price=220.0,
+        stop_price=215.0,
+        requested_qty=20.0
+    )
+    check("Correlation Cluster & Daily Drawdown Circuit Breaker", not dd_app and "DAILY_DRAWDOWN_HALT" in dd_reason, f"Circuit Breaker Triggered: {dd_reason}")
+
+    # [30] C++ Portfolio Greeks Guardrail (Rejected trade pushing net beta-weighted Delta > +0.30 NLV)
+    # Reset ledger to healthy $100k
+    with get_connection(TEST_DB) as conn:
+        conn.execute("INSERT INTO account_ledger (timestamp_utc, cash_balance, reserved_margin, total_equity, realized_pnl, unrealized_pnl, cumulative_friction_usd, note) VALUES ('2026-11-19T13:00:00Z', 100000.0, 0.0, 100000.0, 0.0, 0.0, 0.0, 'Healthy Genesis')")
+        conn.commit()
+
+    # Propose massive long trade pushing Delta to +$45,000 (+45% NLV > 30% cap)
+    greeks_app, greeks_reason, _ = portfolio_guard.evaluate_order_risk(
+        symbol="SPY",
+        asset_class="US_EQUITY",
+        side="BUY",
+        order_type="MARKET",
+        entry_price=590.0,
+        stop_price=585.0,
+        requested_qty=80.0 # 80 * $590 = $47,200 delta
+    )
+    check("C++ Portfolio Greeks Guardrail", not greeks_app and "PORTFOLIO_DELTA_LIMIT" in greeks_reason, f"Blocked Greek Violation: {greeks_reason}")
+
+    # [31] L2 Order Book Imbalance Routing (OBI = -0.52 downgraded BUY MARKET -> passive LIMIT)
+    # 5 bids totaling 480 vol, 5 asks totaling 1520 vol -> OBI = (480 - 1520) / 2000 = -0.52
+    bids_l2 = [(589.95, 100), (589.90, 120), (589.85, 90), (589.80, 80), (589.75, 90)]
+    asks_l2 = [(590.05, 300), (590.10, 350), (590.15, 320), (590.20, 280), (590.25, 270)]
+    calc_obi = micro_engine.calculate_obi(bids_l2, asks_l2)
+    routed_type, routed_px, route_reason = micro_engine.route_order_with_obi(
+        intended_order_type="MARKET",
+        side="BUY",
+        obi=calc_obi,
+        best_bid=589.95,
+        best_ask=590.05
+    )
+    check("L2 Order Book Imbalance Routing", calc_obi == -0.52 and routed_type == "LIMIT", f"OBI: {calc_obi:.2f} -> Downgraded BUY MARKET to passive LIMIT @ ${routed_px:.2f}")
+
+    # [32] OMS L2 Book-Walking Partial Fill (Walked 3 ask levels with realistic blended slippage)
+    # Order for 15 contracts; Level 1 has 50 (cap 10% = 5), Level 2 has 60 (cap 6), Level 3 has 50 (takes 4)
+    walk_res = book_sim.simulate_book_walk_fill(
+        side="BUY",
+        order_qty=15.0,
+        book_levels=[(3.40, 50.0), (3.45, 60.0), (3.50, 50.0)],
+        mid_price=3.35
+    )
+    check("OMS L2 Book-Walking Partial Fill", walk_res["levels_walked"] == 3 and walk_res["blended_fill_price"] > 3.40, f"Walked 3 levels: Filled 15 contracts @ blended ${walk_res['blended_fill_price']:.4f} (Slippage: ${walk_res['total_slippage_usd']:.2f})")
 
     # -------------------------------------------------------------------------
     # FINAL VERIFICATION SUMMARY

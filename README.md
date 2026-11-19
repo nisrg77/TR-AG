@@ -17,13 +17,21 @@ A modular, institutional-grade quant trading engine covering **US Equities, Comm
    - Realistic queue-aware limit fills and gap-aware stop-loss fills.
    - Multi-leg options lifecycle engine with mark-to-market and automatic 16:00 ET expiration cash settlement.
    - Net Liquidation Value (NLV) ledger accounting with gross vs. net equity tracking.
-3. **Multi-Agent Synthesis Layer (`agents/`)**:
-   - **Quant / Technical Forecaster Agent**: Evaluates Amazon Chronos probabilistic return quantiles and trend regimes.
-   - **Catalyst & Sentiment Agent**: Evaluates news and macro headlines (FinBERT / Lexicon).
-   - **Options Strategist Agent**: Selects Bull Call / Bear Put debit spreads when IV Rank $< 35$, or credit spreads / condors when IV Rank $> 50$.
-   - **Deterministic Risk Gate**: Hard-coded liquidity filters, fee-drag rejection ($< 20\%$ profit drag), and $2\%$ maximum portfolio risk per trade.
-4. **Interactive Streamlit Terminal (`dashboard/app.py`)**:
-   - Real-time blotter, open positions, live portfolio Greeks, Gross vs. Net equity curves, and signal audit logs.
+3. **Multi-Layer Institutional Risk Management (`risk/`)**:
+   - Hierarchical Capital & Correlation Caps: Single Trade (1.5% NLV), Same-Symbol (3.0% NLV), Correlation Cluster Cap (5.0% NLV).
+   - Portfolio Greeks Guardrails: Beta-Weighted Delta ($\pm 30\%$ NLV), Gamma Floor ($-0.05 \times \text{NLV}$), Vega Filter, Theta Cap.
+   - Automated Circuit Breakers: Daily Loss Halt ($-3.0\%$), Peak Drawdown Throttle ($-8.0\% / -12.0\%$), Microstructure Volatility Spread Freeze.
+   - 4-Tier Pyramiding Engine: Winner-only scaling (anti-martingale), $0.75 \times \text{ATR}$ spacing, decaying lot sizing ($1.0\times / 0.75\times / 0.50\times / 0.25\times$), and synchronized stop ratcheting.
+4. **Leaving a "Runner" — Core (70%) + Runner (30%) Scaling (`oms/tranche_manager.py`)**:
+   - Decomposes every filled order into Core (70%) and Runner (30%) child tranches.
+   - Core takes profit at $+1.5R$, immediately ratcheting Runner SL to Entry + Fees (Auto-Breakeven).
+   - Runner trails with Chandelier ATR stop ($\text{Highest High} - 2.0 \times \text{ATR}_{14}$) and options DTE time decay rules.
+5. **Liquidity & Order Book Microstructure (`features/microstructure.py` & `oms/book_simulator.py`)**:
+   - L2 Order Book Imbalance (OBI) across top 5 depth levels. Smart routing downgrades aggressive `MARKET` orders to passive `LIMIT` when $\text{OBI} < -0.40$.
+   - Institutional Liquidity Sweep (Stop-Hunt) detector.
+   - Multi-level order book walking with 10% depth participation cap.
+6. **Interactive Streamlit Terminal (`dashboard/app.py`)**:
+   - 7 tabbed views: Equity Curve, Open Positions, Core & Runner Tranches, Order Blotter, Executions, AI Signals, and Risk & Circuit Breaker Audit Logs.
 
 ---
 
@@ -51,11 +59,18 @@ TR-AG/
 │   ├── graph.py               # Multi-agent synthesis pipeline
 │   ├── options_selector.py    # Strategy & strike/expiry selection logic
 │   └── risk_guard.py          # Deterministic liquidity, risk & fee-drag gate
+├── risk/                      # <--- Multi-Layer Institutional Risk & Pyramiding
+│   ├── portfolio_guard.py     # Capital caps, Greeks guardrails & circuit breakers
+│   └── pyramid_manager.py     # 4-tier anti-martingale pyramiding & stop ratcheting
+├── features/
+│   └── microstructure.py      # L2 Order Book Imbalance (OBI) & Liquidity Sweeps
 ├── oms/                       # <--- Self-Hosted Local OMS
-│   ├── database.py            # SQLite schema (orders, executions, positions, ledger, signals)
+│   ├── database.py            # SQLite schema (orders, executions, positions, tranches, ledger)
 │   ├── execution_costs.py     # C++ accelerated realistic friction calculator
 │   ├── engine.py              # Order router, queue-aware limit & gap-aware stop fills
 │   ├── portfolio.py           # Margin, buying power & mark-to-market calculator
+│   ├── tranche_manager.py     # Core (70%) + Runner (30%) & auto-breakeven
+│   ├── book_simulator.py      # L2 order book walking & participation caps
 │   └── options_lifecycle.py   # Multi-leg spread pricing & expiration settlement
 ├── runners/
 │   ├── run_backtest.py        # Historical replay backtest runner

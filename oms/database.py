@@ -128,6 +128,46 @@ def init_db(db_path: Path = DATABASE_PATH, initial_equity: float = STARTING_EQUI
         );
         """)
 
+        # 6. Position Tranches Table (Core 70% + Runner 30% & Pyramiding)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS position_tranches (
+            tranche_id TEXT PRIMARY KEY,
+            parent_position_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            pyramid_tier INTEGER DEFAULT 1,
+            role TEXT NOT NULL,             -- CORE, RUNNER
+            quantity REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            stop_loss REAL NOT NULL,
+            take_profit REAL,
+            trailing_atr_mult REAL DEFAULT 2.0,
+            highest_high REAL,
+            breakeven_armed INTEGER DEFAULT 0,
+            status TEXT NOT NULL,           -- OPEN, CLOSED
+            realized_pnl REAL DEFAULT 0.0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (parent_position_id) REFERENCES positions(position_id)
+        );
+        """)
+
+        # 7. Risk Audit Log Table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS risk_audit_log (
+            audit_id TEXT PRIMARY KEY,
+            timestamp_utc TEXT NOT NULL,
+            signal_id TEXT,
+            symbol TEXT NOT NULL,
+            requested_qty REAL NOT NULL,
+            approved_qty REAL NOT NULL,
+            decision TEXT NOT NULL,         -- APPROVED, DOWNSIZED, REJECTED
+            rejection_reason TEXT,
+            portfolio_delta_after REAL,
+            cluster_risk_pct REAL,
+            created_at TEXT NOT NULL
+        );
+        """)
+
         # Initialize ledger if empty
         cur.execute("SELECT COUNT(*) FROM account_ledger")
         if cur.fetchone()[0] == 0:
