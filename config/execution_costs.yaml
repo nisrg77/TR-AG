@@ -1,0 +1,30 @@
+# Execution Friction & Realism Configuration
+
+us_equities:
+  base_slippage_bps: 1.5
+  atr_volatility_multiplier: 0.05
+  commission_per_share: 0.005
+  min_commission: 1.00
+  max_commission_pct: 0.005
+  sec_transaction_fee_rate: 0.0000278
+  finra_taf_per_share: 0.000166
+
+us_options:
+  k_min: 0.35
+  k_max: 0.85
+  multi_leg_spread_penalty_pct: 0.20
+  contract_commission_per_leg: 0.65
+  regulatory_clearing_fee_per_leg: 0.04
+  min_open_interest: 50
+
+crypto:
+  maker_fee_bps: 4.0
+  taker_fee_bps: 8.0
+  base_slippage_bps: 3.0
+  volume_impact_multiplier: 0.0001
+
+commodities:
+  futures_all_in_fee_per_contract: 2.50
+  tick_slippage_contracts: 1.5
+  tick_size_gold: 0.10
+  tick_size_oil: 0.01

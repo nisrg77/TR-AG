@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Data & SQLite
+data/*.db
+data/historical/*.parquet
+data/historical/*.csv
+data/engine.log
+
+# C++ Build Artifacts
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+
+# Secrets & Config
+config/secrets.env
+.env
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
